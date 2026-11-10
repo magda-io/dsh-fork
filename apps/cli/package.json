@@ -101,7 +101,7 @@
     "@deepseek-ai/dsh-http-proxy": "workspace:^"
   },
   "devDependencies": {
-    "@agentclientprotocol/sdk": "1.4.0",
+    "@agentclientprotocol/sdk": "1.8.0",
     "@deepseek-ai/dsh-acp": "workspace:^",
     "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-agent-loop": "workspace:^",
