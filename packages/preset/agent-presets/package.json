@@ -72,7 +72,7 @@
   "dependencies": {
     "js-yaml": "^4.1.0",
     "@deepseek-ai/schemastery": "workspace:^",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@deepseek-ai/cordis-plugin-group": "workspace:^",
