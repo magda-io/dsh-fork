@@ -22,6 +22,45 @@ STRICT_R = "http://purl.oclc.org/ooxml/officeDocument/relationships"
 PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
+def large_workbook(path, rows, columns, ns=S):
+    """Stream a workbook: shared and inline strings, numbers and one formula per row."""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                         '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>')
+        archive.writestr("xl/workbook.xml", f'<workbook xmlns="{ns}" xmlns:r="{R}"><sheets><sheet name="Large data" sheetId="1" r:id="r1"/></sheets></workbook>')
+        archive.writestr("xl/_rels/workbook.xml.rels", f'<Relationships xmlns="{PKG}"><Relationship Id="r1" Target="worksheets/sheet1.xml"/>'
+                         '<Relationship Id="r2" Target="sharedStrings.xml"/></Relationships>')
+        with archive.open("xl/sharedStrings.xml", "w") as part:
+            part.write(f'<sst xmlns="{ns}">'.encode())
+            for row in range(1, rows + 1):
+                part.write(f"<si><t>label {row}</t></si>".encode())
+            part.write(b"</sst>")
+        with archive.open("xl/worksheets/sheet1.xml", "w") as part:
+            part.write(f'<worksheet xmlns="{ns}"><sheetData>'.encode())
+            for row in range(1, rows + 1):
+                cells = [f'<c r="A{row}" t="s"><v>{row - 1}</v></c>', f'<c r="B{row}" t="inlineStr"><is><t>note {row}</t></is></c>',
+                         f'<c r="C{row}"><f>D{row}*2</f><v>{row * 2}</v></c>']
+                cells.extend(f"<c><v>{column}</v></c>" for column in range(4, columns + 1))
+                part.write((f'<row r="{row}">' + "".join(cells) + "</row>").encode())
+            part.write(b"</sheetData></worksheet>")
+    return path
+
+
+def peak_memory_check(path, *args):
+    # 300,000-cell workbooks: holding whole worksheet trees peaks at 120-175 MiB,
+    # streaming at about 20 MiB, so a 60 MiB bound separates the two quickly.
+    """Run the checker in a wrapper process that reports only the checker's peak RSS in MiB."""
+    probe = ("import json, resource, subprocess, sys\n"
+             "result = subprocess.run(sys.argv[1:], capture_output=True, text=True)\n"
+             "peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss\n"
+             "peak = peak / 1048576 if sys.platform == 'darwin' else peak / 1024\n"
+             "print(json.dumps({'code': result.returncode, 'peak': peak, 'stdout': result.stdout, 'stderr': result.stderr}))\n")
+    result = subprocess.run([sys.executable, "-c", probe, sys.executable, str(CHECKER), str(path), *args],
+                            capture_output=True, text=True, timeout=300)
+    outcome = json.loads(result.stdout)
+    return outcome["code"], json.loads(outcome["stdout"]), outcome["peak"]
+
+
 class OfficeCheckTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="dsh-office-check-")
@@ -211,6 +250,37 @@ class OfficeCheckTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("xl/workbook.xml", report["checks"][0]["detail"])
         self.assertIn("r1", report["checks"][0]["detail"])
+
+    def test_xlsx_contains_spans_adjacent_cell_texts_like_the_joined_corpus(self):
+        path = self.package("xlsx", {
+            "xl/workbook.xml": f'<workbook xmlns="{S}" xmlns:r="{R}"><sheets><sheet name="Notes" sheetId="1" r:id="r1"/></sheets></workbook>',
+            "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{PKG}"><Relationship Id="r1" Target="worksheets/sheet1.xml"/></Relationships>',
+            "xl/worksheets/sheet1.xml": f'<worksheet xmlns="{S}"><sheetData><row r="1">'
+                                        '<c r="A1" t="inlineStr"><is><t>alpha</t></is></c><c r="B1" t="inlineStr"><is><t>beta</t></is></c>'
+                                        '<c r="C1" t="str"><v>gamma</v></c></row></sheetData></worksheet>',
+        })
+        # One inline-text piece per cell (empty for C1), then str values, then
+        # the sheet name, joined by newlines: "alpha\nbeta\n\ngamma\nNotes".
+        for required in ("alpha\nbeta", "beta\n\ngamma", "gamma\nNotes", "pha\nbe"):
+            self.assertEqual(self.run_check(path, "--contains", required)[0], 0, required)
+        for required in ("alphabeta", "beta\ngamma", "alpha\ngamma"):
+            self.assertEqual(self.run_check(path, "--contains", required)[0], 1, required)
+
+    def test_xlsx_tall_worksheet_is_checked_in_bounded_memory(self):
+        path = large_workbook(self.root / "tall.xlsx", rows=30_000, columns=10)
+        code, report, peak = peak_memory_check(path, "--contains", "label 30000", "--contains", "note 29999",
+                                               "--contains", "Large data", "--count", "1")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["summary"]["sheets"], [{"name": "Large data", "cells": 300_000, "formulas": 30_000}])
+        self.assertLess(peak, 60, f"peak RSS {peak:.0f} MiB")
+
+    def test_xlsx_wide_worksheet_is_checked_in_bounded_memory(self):
+        path = large_workbook(self.root / "wide.xlsx", rows=60, columns=5_000)
+        code, report, peak = peak_memory_check(path, "--contains", "label 60", "--contains", "missing text")
+        self.assertEqual(code, 1, report)
+        self.assertEqual([check["status"] for check in report["checks"]], ["pass", "pass", "fail"])
+        self.assertEqual(report["summary"]["sheets"], [{"name": "Large data", "cells": 300_000, "formulas": 60}])
+        self.assertLess(peak, 60, f"peak RSS {peak:.0f} MiB")
 
     def test_xlsx_empty_or_missing_string_values_remain_json_reports(self):
         for cell_type, expected in [("s", 1), ("str", 0)]:
