@@ -17,6 +17,7 @@ import posixpath
 import sys
 import zipfile
 import zlib
+from array import array
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
@@ -163,45 +164,212 @@ def inspect_pptx(xml: dict[str, ET.Element]) -> tuple[dict, str]:
     return {"slides": len(slides)}, "\n".join(texts)
 
 
-def inspect_xlsx(xml: dict[str, ET.Element]) -> tuple[dict, str]:
+class TextStream:
+    """Consecutive pieces of the newline-joined text corpus, searched as they arrive.
+
+    Only the first and last few characters are retained, enough for a required
+    string to span into a neighbouring stream, so memory does not grow with the text.
+    """
+
+    def __init__(self, required: tuple[str, ...]):
+        self.required = required
+        self.window = max((len(text) for text in required), default=0)
+        self.pieces = 0
+        self.head = ""
+        self.tail = ""
+        self.length = 0
+        self.found: set[str] = set()
+
+    def add(self, piece: str, inside: frozenset[str] = frozenset()) -> None:
+        """Append one piece; `inside` names required texts known to occur within it."""
+        text = piece if self.pieces == 0 else "\n" + piece
+        self.pieces += 1
+        if not self.window:
+            return
+        self.found |= inside
+        joined = self.tail + text
+        for required in self.required:
+            if required not in self.found and required in joined:
+                self.found.add(required)
+        if len(self.head) < self.window:
+            self.head = (self.head + text)[:self.window]
+        self.tail = joined[-(self.window - 1):] if self.window > 1 else ""
+        self.length += len(text)
+
+    def boundary_text(self) -> str:
+        """The stream's text when short, else its head and tail around an unmatchable gap."""
+        if self.length <= len(self.head):
+            return self.head
+        # Command-line arguments cannot contain NUL, so no required text spans the gap;
+        # every match inside the elided middle was already found by add().
+        return self.head + "\0" + self.tail
+
+
+class StreamedText:
+    """Answer `required in text` for the corpus that ordered TextStreams describe."""
+
+    def __init__(self, streams: list[TextStream]):
+        self.found = set().union(*(stream.found for stream in streams))
+        self.boundaries = "\n".join(stream.boundary_text() for stream in streams if stream.pieces)
+
+    def __contains__(self, required: str) -> bool:
+        return required in self.found or required in self.boundaries
+
+
+SHARED_STRING_BUDGET = 64 * 1024 * 1024
+
+
+class SharedStrings:
+    """Shared strings reduced to what --contains can still need, in compact storage.
+
+    Each string keeps a bitmask of the required texts it fully contains and, when it is
+    longer than the matching window allows, only its first and last window-1 characters
+    around a NUL gap. XML text cannot contain NUL, so no required text spans the gap;
+    matches across string boundaries therefore stay exact while storage per string is
+    bounded by the longest required text instead of the string's length.
+    """
+
+    def __init__(self, required: tuple[str, ...], budget: int = SHARED_STRING_BUDGET):
+        self.required = required
+        self.keep = max((len(text) for text in required), default=1) - 1
+        self.mask_bytes = (len(required) + 7) // 8
+        self.budget = budget
+        self.text = bytearray()
+        self.offsets = array("I", [0])
+        self.masks = bytearray()
+
+    def __len__(self) -> int:
+        return len(self.offsets) - 1
+
+    def append(self, value: str) -> None:
+        mask = 0
+        for bit, required in enumerate(self.required):
+            if required in value:
+                mask |= 1 << bit
+        if len(value) > 2 * self.keep + 1:
+            value = (value[:self.keep] + "\0" + value[len(value) - self.keep:]) if self.keep else "\0"
+        self.text += value.encode("utf-8", "surrogatepass")
+        self.offsets.append(len(self.text))
+        self.masks += mask.to_bytes(self.mask_bytes, "little")
+        used = len(self.text) + self.offsets.itemsize * len(self.offsets) + len(self.masks)
+        if used > self.budget:
+            raise ValueError(
+                f"xl/sharedStrings.xml: shared strings needed for --contains exceed the checker's "
+                f"{self.budget // (1024 * 1024)} MiB budget; check text with openpyxl read_only=True instead"
+            )
+
+    def get(self, index: int) -> tuple[str, frozenset[str]]:
+        value = self.text[self.offsets[index]:self.offsets[index + 1]].decode("utf-8", "surrogatepass")
+        start = index * self.mask_bytes
+        mask = int.from_bytes(self.masks[start:start + self.mask_bytes], "little")
+        return value, frozenset(text for bit, text in enumerate(self.required) if mask >> bit & 1)
+
+
+class DiscardTree:
+    """XML parser target that checks well-formedness without building a tree."""
+
+    def start(self, tag, attributes):
+        pass
+
+    def end(self, tag):
+        pass
+
+    def data(self, data):
+        pass
+
+    def close(self):
+        return None
+
+
+def check_well_formed(archive: zipfile.ZipFile, name: str) -> None:
+    parser = ET.XMLParser(target=DiscardTree())
+    with archive.open(name) as part:
+        while chunk := part.read(1 << 20):
+            parser.feed(chunk)
+    parser.close()
+
+
+def iter_streamed(archive: zipfile.ZipFile, name: str, supported: tuple[str, ...], drop: set[str]):
+    """Yield (namespace, completed element) for a large part, detaching `drop` elements once yielded."""
+    stack: list[ET.Element] = []
+    uri = None
+    with archive.open(name) as part:
+        for event, element in ET.iterparse(part, events=("start", "end")):
+            if event == "start":
+                if uri is None:
+                    uri = namespace(element, supported, name)
+                stack.append(element)
+                continue
+            stack.pop()
+            yield uri, element
+            if stack and element.tag[len(uri):] in drop:
+                stack[-1].remove(element)
+    if uri is None:
+        raise ValueError(f"{name} has no root element")
+
+
+def inspect_xlsx(xml: dict[str, ET.Element], archive: zipfile.ZipFile, deferred: set[str],
+                 required: tuple[str, ...] = ()) -> tuple[dict, StreamedText]:
     part = "xl/workbook.xml"
     links = relationships(part, xml)
     root = xml[part]
     s = namespace(root, S_NAMESPACES, part)
     sheets = []
-    texts = []
-    shared = xml.get("xl/sharedStrings.xml")
-    shared_s = s if shared is None else namespace(shared, S_NAMESPACES, "xl/sharedStrings.xml")
-    shared_strings = [] if shared is None else [
-        "".join(node.text or "" for node in item.iter(f"{shared_s}t")) for item in shared.iter(f"{shared_s}si")
-    ]
+    streams: list[TextStream] = []
+    visited = set()
+    # Shared strings and worksheets grow with the workbook, so they are streamed.
+    shared_name = "xl/sharedStrings.xml"
+    shared_strings = SharedStrings(required)
+    shared_count = 0
+    if shared_name in deferred:
+        visited.add(shared_name)
+        for uri, element in iter_streamed(archive, shared_name, S_NAMESPACES, {"si"}):
+            if element.tag == f"{uri}si":
+                shared_count += 1
+                if required:
+                    shared_strings.append("".join(node.text or "" for node in element.iter(f"{uri}t")))
     for sheet in root.findall(f"{s}sheets/{s}sheet"):
         reference = relationship_id(sheet, part)
-        tree = related_xml(part, reference, links, xml)
-        sheet_s = namespace(tree, S_NAMESPACES, links[reference])
-        cells = list(tree.iter(f"{sheet_s}c"))
-        formulas = sum(cell.find(f"{sheet_s}f") is not None for cell in cells)
-        sheets.append({"name": sheet.attrib["name"], "cells": len(cells), "formulas": formulas})
-        for cell in cells:
+        if reference not in links:
+            raise ValueError(f"{part} references missing relationship: {reference}")
+        target = links[reference]
+        if target not in deferred:
+            raise ValueError(f"{part} relationship {reference} targets a non-XML member: {target}")
+        visited.add(target)
+        cells = formulas = 0
+        shared_text, inline_text, string_values = TextStream(required), TextStream(required), TextStream(required)
+        for sheet_s, cell in iter_streamed(archive, target, S_NAMESPACES, {"c", "row"}):
+            if cell.tag != f"{sheet_s}c":
+                continue
+            cells += 1
+            formulas += cell.find(f"{sheet_s}f") is not None
             if cell.get("t") == "s":
                 value = cell.findtext(f"{sheet_s}v", "")
-                location = f"{links[reference]} cell {cell.get('r', '(no reference)')}"
+                location = f"{target} cell {cell.get('r', '(no reference)')}"
                 try:
                     index = int(value)
                 except ValueError as error:
                     raise ValueError(f"{location}: invalid shared string index {value!r}") from error
-                if not 0 <= index < len(shared_strings):
+                if not 0 <= index < shared_count:
                     raise ValueError(f"{location}: shared string index out of range: {index}")
-                texts.append(shared_strings[index])
-        texts.extend("".join(node.text or "" for node in cell.iter(f"{sheet_s}t")) for cell in cells)
-        texts.extend(cell.findtext(f"{sheet_s}v", "") for cell in cells if cell.get("t") == "str")
-        texts.append(sheet.attrib["name"])
-    return {"sheets": sheets, "formulas_evaluated": False}, "\n".join(texts)
+                if required:
+                    shared_text.add(*shared_strings.get(index))
+            inline_text.add("".join(node.text or "" for node in cell.iter(f"{sheet_s}t")))
+            if cell.get("t") == "str":
+                string_values.add(cell.findtext(f"{sheet_s}v", ""))
+        sheets.append({"name": sheet.attrib["name"], "cells": cells, "formulas": formulas})
+        sheet_name = TextStream(required)
+        sheet_name.add(sheet.attrib["name"])
+        streams.extend([shared_text, inline_text, string_values, sheet_name])
+    for name in sorted(deferred - visited):
+        check_well_formed(archive, name)
+    return {"sheets": sheets, "formulas_evaluated": False}, StreamedText(streams)
 
 
-def inspect(path: Path) -> tuple[dict, str]:
+def inspect(path: Path, required: tuple[str, ...] = ()) -> tuple[dict, str | StreamedText]:
     """Validate package members and relationships before inspecting the main part."""
-    main, content_type = MAIN_PARTS[path.suffix.lower()]
+    suffix = path.suffix.lower()
+    main, content_type = MAIN_PARTS[suffix]
     with zipfile.ZipFile(path) as archive:
         members = archive.namelist()
         if len(members) != len(set(members)):
@@ -209,29 +377,37 @@ def inspect(path: Path) -> tuple[dict, str]:
         corrupt = archive.testzip()
         if corrupt is not None:
             raise ValueError(f"ZIP member failed its CRC check: {corrupt}")
-        xml = {name: ET.fromstring(archive.read(name)) for name in members
-               if name.endswith((".xml", ".rels"))}
-    if main not in xml:
-        raise ValueError(f"missing main part: {main}")
-    types = xml.get("[Content_Types].xml")
-    if types is None or not any(node.get("PartName") == "/" + main
-                                and node.get("ContentType", "").endswith(content_type) for node in types):
-        raise ValueError(f"[Content_Types].xml does not declare {main} as {path.suffix.lower()}")
-    for name, tree in xml.items():
-        if not name.endswith(".rels"):
-            continue
-        source = "" if name == "_rels/.rels" else posixpath.join(posixpath.dirname(posixpath.dirname(name)), posixpath.basename(name)[:-5])
-        for rel in tree:
-            if rel.get("TargetMode") == "External":
+        names = [name for name in members if name.endswith((".xml", ".rels"))]
+        deferred: set[str] = set()
+        if suffix == ".xlsx":
+            # Workbook parts (worksheets) and shared strings scale with the data:
+            # stream them in inspect_xlsx instead of holding every tree at once.
+            rels = {name: ET.fromstring(archive.read(name)) for name in names if name.endswith(".rels")}
+            deferred = {target for target in relationships(main, rels).values()
+                        if target in names and target.endswith(".xml") and target != main}
+            deferred |= {"xl/sharedStrings.xml"} & set(names)
+        xml = {name: ET.fromstring(archive.read(name)) for name in names if name not in deferred}
+        if main not in xml:
+            raise ValueError(f"missing main part: {main}")
+        types = xml.get("[Content_Types].xml")
+        if types is None or not any(node.get("PartName") == "/" + main
+                                    and node.get("ContentType", "").endswith(content_type) for node in types):
+            raise ValueError(f"[Content_Types].xml does not declare {main} as {suffix}")
+        for name, tree in xml.items():
+            if not name.endswith(".rels"):
                 continue
-            target = relationship_target(source, rel.attrib["Target"])
-            if target not in members:
-                raise ValueError(f"{name} references missing package member: {target}")
-    if path.suffix.lower() == ".docx":
-        return inspect_docx(xml)
-    if path.suffix.lower() == ".pptx":
-        return inspect_pptx(xml)
-    return inspect_xlsx(xml)
+            source = "" if name == "_rels/.rels" else posixpath.join(posixpath.dirname(posixpath.dirname(name)), posixpath.basename(name)[:-5])
+            for rel in tree:
+                if rel.get("TargetMode") == "External":
+                    continue
+                target = relationship_target(source, rel.attrib["Target"])
+                if target not in members:
+                    raise ValueError(f"{name} references missing package member: {target}")
+        if suffix == ".docx":
+            return inspect_docx(xml)
+        if suffix == ".pptx":
+            return inspect_pptx(xml)
+        return inspect_xlsx(xml, archive, deferred, tuple(required))
 
 
 def main() -> int:
@@ -250,7 +426,7 @@ def main() -> int:
     checks = []
     summary = {}
     try:
-        summary, text = inspect(args.input)
+        summary, text = inspect(args.input, tuple(args.contains))
         checks.append({"id": "package", "status": "pass"})
         for required in args.contains:
             checks.append({"id": "contains", "status": "pass" if required in text else "fail", "text": required})
