@@ -1,5 +1,6 @@
 """Exercise the distributed checker without requiring external Office libraries."""
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -59,6 +60,26 @@ def peak_memory_check(path, *args):
                             capture_output=True, text=True, timeout=300)
     outcome = json.loads(result.stdout)
     return outcome["code"], json.loads(outcome["stdout"]), outcome["peak"]
+
+
+def many_shared_strings(path, count, length):
+    """A workbook with a large table of distinct shared strings, few of them referenced."""
+    filler = "x" * max(0, length - 12)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                         '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>')
+        archive.writestr("xl/workbook.xml", f'<workbook xmlns="{S}" xmlns:r="{R}"><sheets><sheet name="Strings" sheetId="1" r:id="r1"/></sheets></workbook>')
+        archive.writestr("xl/_rels/workbook.xml.rels", f'<Relationships xmlns="{PKG}"><Relationship Id="r1" Target="worksheets/sheet1.xml"/>'
+                         '<Relationship Id="r2" Target="sharedStrings.xml"/></Relationships>')
+        with archive.open("xl/sharedStrings.xml", "w") as part:
+            part.write(f'<sst xmlns="{S}">'.encode())
+            for index in range(count):
+                part.write(f"<si><t>row {index:07d} {filler}</t></si>".encode())
+            part.write(b"</sst>")
+        last = count - 1
+        archive.writestr("xl/worksheets/sheet1.xml", f'<worksheet xmlns="{S}"><sheetData><row r="1">'
+                         f'<c r="A1" t="s"><v>{last}</v></c><c r="B1" t="s"><v>0</v></c></row></sheetData></worksheet>')
+    return path
 
 
 class OfficeCheckTest(unittest.TestCase):
@@ -281,6 +302,54 @@ class OfficeCheckTest(unittest.TestCase):
         self.assertEqual([check["status"] for check in report["checks"]], ["pass", "pass", "fail"])
         self.assertEqual(report["summary"]["sheets"], [{"name": "Large data", "cells": 300_000, "formulas": 60}])
         self.assertLess(peak, 60, f"peak RSS {peak:.0f} MiB")
+
+    def test_xlsx_contains_does_not_retain_the_full_shared_string_table(self):
+        path = many_shared_strings(self.root / "strings.xlsx", count=60_000, length=400)
+        _, report, without = peak_memory_check(path)
+        self.assertEqual(report["verdict"], "pass", report)
+        code, report, peak = peak_memory_check(path, "--contains", "row 0059999", "--contains", "row 0000000",
+                                               "--contains", "row 0000001")
+        self.assertEqual(code, 1, report)
+        # Referenced strings are found, including across the A1/B1 boundary; unreferenced ones are not.
+        self.assertEqual([check["status"] for check in report["checks"]], ["pass", "pass", "pass", "fail"])
+        # About 23 MiB of shared-string text: retaining it adds over 25 MiB; compact storage about 1 MiB.
+        self.assertLess(peak - without, 15, f"--contains added {peak - without:.0f} MiB")
+
+    def test_xlsx_contains_spans_truncated_shared_strings_exactly(self):
+        long_a, long_b = "head-" + "a" * 200 + "-tailA", "headB-" + "b" * 200 + "-tail"
+        path = self.package("xlsx", {
+            "xl/workbook.xml": f'<workbook xmlns="{S}" xmlns:r="{R}"><sheets><sheet name="Long" sheetId="1" r:id="r1"/></sheets></workbook>',
+            "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{PKG}"><Relationship Id="r1" Target="worksheets/sheet1.xml"/>'
+                                          '<Relationship Id="r2" Target="sharedStrings.xml"/></Relationships>',
+            "xl/sharedStrings.xml": f'<sst xmlns="{S}"><si><t>{long_a}</t></si><si><t>{long_b}</t></si><si><t>unused middle</t></si></sst>',
+            "xl/worksheets/sheet1.xml": f'<worksheet xmlns="{S}"><sheetData><row r="1">'
+                                        '<c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData></worksheet>',
+        })
+        # Corpus: long_a + "\n" + long_b, two empty inline pieces, then "Long". Short
+        # windows truncate both 211-character strings, so matches must still be exact
+        # inside them (middle), across their ends, and never across the elided middle.
+        cases = [
+            # (required texts checked together, expected statuses); the longest text sets the window.
+            (("tailA\nheadB", "a" * 25, "b-tail\n\n\nLong", "head-aaaa", "bb-tail"), ["pass"] * 5),
+            (("a" * 150, "a" * 201), ["pass", "fail"]),
+            (("tailA\nheadBX", "unused middle", "headB-" + "b" * 24 + "-tail"), ["fail"] * 3),
+            (("aaaa-tailA\nheadB-" + "b" * 24 + "-tail", "tailA\nheadB"), ["fail", "pass"]),
+        ]
+        for required, expected in cases:
+            args = [argument for text in required for argument in ("--contains", text)]
+            report = self.run_check(path, *args)[1]
+            self.assertEqual([check["status"] for check in report["checks"][1:]], expected, required)
+
+    def test_shared_string_table_fails_closed_beyond_its_budget(self):
+        spec = importlib.util.spec_from_file_location("check_office", CHECKER)
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        table = checker.SharedStrings(("needle",), budget=4096)
+        table.append("x" * 500 + "needle" + "y" * 500)
+        self.assertEqual(table.get(0), ("xxxxx\0yyyyy", frozenset({"needle"})))
+        with self.assertRaisesRegex(ValueError, "exceed the checker's 0 MiB budget; check text with openpyxl read_only=True"):
+            for index in range(1000):
+                table.append(f"value {index}")
 
     def test_xlsx_empty_or_missing_string_values_remain_json_reports(self):
         for cell_type, expected in [("s", 1), ("str", 0)]:

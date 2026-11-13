@@ -17,6 +17,7 @@ import posixpath
 import sys
 import zipfile
 import zlib
+from array import array
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
@@ -179,11 +180,13 @@ class TextStream:
         self.length = 0
         self.found: set[str] = set()
 
-    def add(self, piece: str) -> None:
+    def add(self, piece: str, inside: frozenset[str] = frozenset()) -> None:
+        """Append one piece; `inside` names required texts known to occur within it."""
         text = piece if self.pieces == 0 else "\n" + piece
         self.pieces += 1
         if not self.window:
             return
+        self.found |= inside
         joined = self.tail + text
         for required in self.required:
             if required not in self.found and required in joined:
@@ -211,6 +214,55 @@ class StreamedText:
 
     def __contains__(self, required: str) -> bool:
         return required in self.found or required in self.boundaries
+
+
+SHARED_STRING_BUDGET = 64 * 1024 * 1024
+
+
+class SharedStrings:
+    """Shared strings reduced to what --contains can still need, in compact storage.
+
+    Each string keeps a bitmask of the required texts it fully contains and, when it is
+    longer than the matching window allows, only its first and last window-1 characters
+    around a NUL gap. XML text cannot contain NUL, so no required text spans the gap;
+    matches across string boundaries therefore stay exact while storage per string is
+    bounded by the longest required text instead of the string's length.
+    """
+
+    def __init__(self, required: tuple[str, ...], budget: int = SHARED_STRING_BUDGET):
+        self.required = required
+        self.keep = max((len(text) for text in required), default=1) - 1
+        self.mask_bytes = (len(required) + 7) // 8
+        self.budget = budget
+        self.text = bytearray()
+        self.offsets = array("I", [0])
+        self.masks = bytearray()
+
+    def __len__(self) -> int:
+        return len(self.offsets) - 1
+
+    def append(self, value: str) -> None:
+        mask = 0
+        for bit, required in enumerate(self.required):
+            if required in value:
+                mask |= 1 << bit
+        if len(value) > 2 * self.keep + 1:
+            value = (value[:self.keep] + "\0" + value[len(value) - self.keep:]) if self.keep else "\0"
+        self.text += value.encode("utf-8", "surrogatepass")
+        self.offsets.append(len(self.text))
+        self.masks += mask.to_bytes(self.mask_bytes, "little")
+        used = len(self.text) + self.offsets.itemsize * len(self.offsets) + len(self.masks)
+        if used > self.budget:
+            raise ValueError(
+                f"xl/sharedStrings.xml: shared strings needed for --contains exceed the checker's "
+                f"{self.budget // (1024 * 1024)} MiB budget; check text with openpyxl read_only=True instead"
+            )
+
+    def get(self, index: int) -> tuple[str, frozenset[str]]:
+        value = self.text[self.offsets[index]:self.offsets[index + 1]].decode("utf-8", "surrogatepass")
+        start = index * self.mask_bytes
+        mask = int.from_bytes(self.masks[start:start + self.mask_bytes], "little")
+        return value, frozenset(text for bit, text in enumerate(self.required) if mask >> bit & 1)
 
 
 class DiscardTree:
@@ -267,7 +319,7 @@ def inspect_xlsx(xml: dict[str, ET.Element], archive: zipfile.ZipFile, deferred:
     visited = set()
     # Shared strings and worksheets grow with the workbook, so they are streamed.
     shared_name = "xl/sharedStrings.xml"
-    shared_strings: list[str] = []
+    shared_strings = SharedStrings(required)
     shared_count = 0
     if shared_name in deferred:
         visited.add(shared_name)
@@ -301,7 +353,7 @@ def inspect_xlsx(xml: dict[str, ET.Element], archive: zipfile.ZipFile, deferred:
                 if not 0 <= index < shared_count:
                     raise ValueError(f"{location}: shared string index out of range: {index}")
                 if required:
-                    shared_text.add(shared_strings[index])
+                    shared_text.add(*shared_strings.get(index))
             inline_text.add("".join(node.text or "" for node in cell.iter(f"{sheet_s}t")))
             if cell.get("t") == "str":
                 string_values.add(cell.findtext(f"{sheet_s}v", ""))
