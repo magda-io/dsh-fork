@@ -68,7 +68,7 @@ describe('Node compatibility self-hosted routing', () => {
   })
 
   it('preserves all three required version jobs and their concurrency', () => {
-    expect(job.if).toBe("github.event_name == 'pull_request'")
+    expect(job.if).toBe("github.event_name == 'pull_request' && !contains(format(',{0},', vars.DSH_CI_DISABLED), ',node-compat,')")
     expect(job.strategy['fail-fast']).toBe(false)
     expect(job.strategy.matrix.include).toEqual([
       { node: '22.19', name: 'node 22.19', runner: 'ubuntu-latest', gate_concurrency: '1' },

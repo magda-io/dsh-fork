@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
@@ -7,6 +8,33 @@ import { describe, expect, it } from 'vitest'
 function evaluateRunsOn(selector: unknown, context: Record<string, unknown>): unknown {
   if (typeof selector !== 'string') throw new TypeError('Runner selector must be a string')
   return runInNewContext(selector.trim().slice(3, -2), context, { timeout: 1000 })
+}
+
+/**
+ * Evaluate a workflow expression with the GitHub functions the switches use.
+ * @param expression - an `if:` value or a `${{ }}` string.
+ * @param context - the `vars` and other contexts the expression reads.
+ * @returns The expression's value.
+ */
+function evaluateExpression(expression: unknown, context: Record<string, unknown>): unknown {
+  if (typeof expression !== 'string') throw new TypeError('Workflow expression must be a string')
+  const trimmed = expression.trim()
+  const source = trimmed.startsWith('${{') ? trimmed.slice(3, -2) : trimmed
+  return runInNewContext(source, {
+    github: { event_name: 'pull_request' },
+    ...context,
+    contains: (haystack: string | undefined, needle: string | undefined) => (haystack ?? '').toLowerCase().includes((needle ?? '').toLowerCase()),
+    format: (template: string, ...values: (string | undefined)[]) => template.replace(/\{(\d+)\}/gu, (_match, index: string) => values[Number(index)] ?? ''),
+  }, { timeout: 1000 })
+}
+
+/**
+ * The `if:` of a pull-request job that `DSH_CI_DISABLED` can switch off.
+ * @param job - the job ID.
+ * @returns The expected condition.
+ */
+function pullRequestJobIf(job: string): string {
+  return `github.event_name == 'pull_request' && !contains(format(',{0},', vars.DSH_CI_DISABLED), ',${job},')`
 }
 
 const root = resolve(import.meta.dirname, '..')
@@ -190,7 +218,7 @@ describe('CI workflow', () => {
       const cores = jobName === 'windows-native-tests' ? 2 : 16
       expect(evaluateRunsOn(job['runs-on'], { vars: { DSH_CI_FAILOVER_WINDOWS: 'blacksmith' } }))
         .toBe(`blacksmith-${cores}vcpu-windows-2025`)
-      expect(job.if).toBe("github.event_name == 'pull_request'")
+      expect(job.if).toBe(pullRequestJobIf(jobName))
     }
 
     // windows-build runs the blocking build/site pair.
@@ -460,7 +488,7 @@ describe('CI workflow', () => {
     const aggregate = workflowJob(workflow, 'all-checks-passed')
 
     expect(benchmark['runs-on']).toBe('ubuntu-24.04')
-    expect(benchmark.if).toBe("github.event_name == 'pull_request'")
+    expect(benchmark.if).toBe(pullRequestJobIf('node-24-bench'))
     expect(benchmark.needs).toBeUndefined()
     expect(benchmark['continue-on-error']).toBeUndefined()
     expect(benchmark.env).toBeUndefined()
@@ -611,11 +639,10 @@ describe('CI workflow', () => {
     }
 
     expect(pythonRuntime).toMatchObject({
-      if: "github.event_name == 'pull_request'",
+      if: pullRequestJobIf('python-runtime'),
       name: 'python runtime / release-shaped matrix',
       uses: './.github/workflows/build-exe-for-python-sdk.yml',
       with: {
-        targets: 'node24-linux-x64,node24-win-x64',
         ci: true,
       },
       secrets: {
@@ -623,6 +650,74 @@ describe('CI workflow', () => {
       },
     })
     expect(aggregate.needs).toContain('python-runtime')
+    if (!isRecord(pythonRuntime.with)) throw new TypeError('python-runtime must pass inputs')
+    expect(evaluateExpression(pythonRuntime.with.targets, { vars: {} })).toBe('node24-linux-x64,node24-win-x64')
+  })
+
+  describe('MAGDA fork switches', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    const jobs = workflow.jobs as Record<string, Record<string, unknown>>
+    const pullRequestJobs = Object.keys(jobs).filter(name => name !== 'all-checks-passed')
+
+    it('lets DSH_CI_DISABLED skip each pull-request job by its exact ID', () => {
+      expect(pullRequestJobs).toContain('windows-build')
+      for (const name of pullRequestJobs) {
+        const condition = jobs[name]?.if
+        expect(condition, name).toBe(pullRequestJobIf(name))
+        expect(evaluateExpression(condition, { vars: {} }), name).toBe(true)
+        expect(evaluateExpression(condition, { vars: { DSH_CI_DISABLED: `x,${name},y` } }), name).toBe(false)
+        expect(evaluateExpression(condition, { vars: { DSH_CI_DISABLED: `${name}-more,prefix-${name}` } }), name).toBe(true)
+      }
+    })
+
+    it("routes the enterprise Linux jobs to GitHub-hosted runners under 'github'", () => {
+      for (const name of ['node-24', 'node-24-coverage', 'node-24-consumers']) {
+        expect(evaluateRunsOn(jobs[name]?.['runs-on'], { vars: { DSH_CI_FAILOVER_LINUX: 'github' } }), name).toBe('ubuntu-24.04')
+      }
+      const verdictContext = { vars: { DSH_CI_FAILOVER_LINUX: 'github' }, github: { event: { pull_request: { user: { login: 'x' } } } } }
+      expect(evaluateRunsOn(jobs['all-checks-passed']?.['runs-on'], verdictContext)).toBe('ubuntu-latest')
+    })
+
+    it("runs the uninstrumented unit lane instead of coverage under 'github'", () => {
+      const steps = (jobs['node-24-coverage']?.steps as unknown[]).filter(isRecord)
+      const lane = steps.find(step => step.name === 'Run exhaustive coverage')
+      expect(evaluateExpression(lane?.run, { vars: { DSH_CI_FAILOVER_LINUX: 'github' } })).toBe('pnpm run check:ci:unit')
+      expect(evaluateExpression(lane?.run, { vars: {} })).toBe('pnpm run check:ci:coverage')
+      expect(evaluateExpression(lane?.run, { vars: { DSH_CI_FAILOVER_LINUX: 'selfhosted' } })).toBe('pnpm run check:ci:coverage')
+    })
+
+    it('drops only the Windows python-runtime target when disabled', () => {
+      const inputs = jobs['python-runtime']?.with as Record<string, unknown>
+      expect(evaluateExpression(inputs.targets, { vars: { DSH_CI_DISABLED: 'python-runtime-windows' } })).toBe('node24-linux-x64')
+    })
+
+    it('lets DSH_CI_DISABLED skip every real-API wheel step', () => {
+      const build = loadWorkflow('.github/workflows/build-exe-for-python-sdk.yml')
+      const steps = Object.values(build.jobs as Record<string, Record<string, unknown>>)
+        .flatMap(job => Array.isArray(job.steps) ? job.steps.filter(isRecord) : [])
+        .filter(step => typeof step.name === 'string' && step.name.includes('real API'))
+      expect(steps).toHaveLength(4)
+      for (const step of steps) expect(step.if, String(step.name)).toContain("!contains(format(',{0},', vars.DSH_CI_DISABLED), ',python-live-api,')")
+    })
+
+    it.skipIf(process.platform === 'win32' || spawnSync('jq', ['--version']).status !== 0)(
+      'accepts a skipped needed job only when DSH_CI_DISABLED lists it', () => {
+        const steps = jobs['all-checks-passed']?.steps as Record<string, unknown>[]
+        const verdict = steps.find(step => step.name === 'Fail if any needed job did not succeed')
+        if (typeof verdict?.run !== 'string') throw new TypeError('verdict step must run a script')
+        const script = verdict.run
+        const run = (results: Record<string, string>, disabled = ''): number | null => {
+          const needs = Object.fromEntries(Object.entries(results).map(([job, result]) => [job, { result }]))
+          return spawnSync('bash', ['-c', script], { env: { ...process.env, NEEDS: JSON.stringify(needs), DSH_CI_DISABLED: disabled } }).status
+        }
+        expect(run({ 'node-24': 'success', 'windows-build': 'success' })).toBe(0)
+        expect(run({ 'node-24': 'success', 'windows-build': 'skipped' }, 'windows-build,python-live-api')).toBe(0)
+        expect(run({ 'node-24': 'success', 'windows-build': 'skipped' })).toBe(1)
+        expect(run({ 'node-24': 'success', 'windows-build': 'skipped' }, 'windows-build-x')).toBe(1)
+        expect(run({ 'node-24': 'failure', 'windows-build': 'skipped' }, 'node-24,windows-build')).toBe(1)
+        expect(run({ 'node-24': 'cancelled' }, 'node-24')).toBe(1)
+      },
+    )
   })
 
   it('keeps every Vitest project process-isolated on native Windows', () => {

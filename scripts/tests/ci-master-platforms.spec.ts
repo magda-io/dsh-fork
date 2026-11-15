@@ -1,4 +1,5 @@
 /** Scheduling policy for post-merge native runtime carriers and Wine. */
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
@@ -9,6 +10,19 @@ import { gatesForMode } from '../run-gates.ts'
 const root = resolve(import.meta.dirname, '../..')
 const masterPush = "github.event_name == 'push' && github.ref == 'refs/heads/master'"
 const runtimeBuilder = './.github/workflows/build-exe-for-python-sdk.yml'
+const verdictRunnable = process.platform !== 'win32' && spawnSync('jq', ['--version']).status === 0
+
+/**
+ * Run the verdict step's script over needed-job results, as Actions would.
+ * @param script - the step's `run`.
+ * @param results - one result per needed job ID.
+ * @param disabled - the `DSH_CI_DISABLED` value.
+ * @returns The script's exit status.
+ */
+function runVerdict(script: string, results: Record<string, string>, disabled = ''): number | null {
+  const needs = Object.fromEntries(Object.entries(results).map(([job, result]) => [job, { result }]))
+  return spawnSync('bash', ['-c', script], { env: { ...process.env, NEEDS: JSON.stringify(needs), DSH_CI_DISABLED: disabled } }).status
+}
 
 interface Job {
   if?: string | boolean
@@ -62,8 +76,12 @@ describe('master-only platform scheduling', () => {
       expect(evaluateCondition(condition, true, results)).toBe(false)
       expect(evaluateCondition(condition, false, results, 'push')).toBe(false)
       const failureStep = aggregate.steps!.find(step => step.name === 'Fail if any needed job did not succeed')!
-      expect(evaluateCondition(failureStep.if!, false, results)).toBe(result !== 'success')
-      expect(failureStep.run).toContain('exit 1')
+      // The step always runs; its script fails on any result but success unless DSH_CI_DISABLED lists a skipped job.
+      expect(failureStep.if).toBeUndefined()
+      if (verdictRunnable) {
+        const byJob = Object.fromEntries(aggregate.needs!.map((job, index) => [job, results[index]!]))
+        expect(runVerdict(failureStep.run!, byJob)).toBe(result === 'success' ? 0 : 1)
+      }
     },
   )
 
@@ -76,10 +94,13 @@ describe('master-only platform scheduling', () => {
     const pr = workflow('ci.yml')
     expect(Object.keys(pr.on)).toEqual(['pull_request'])
     expect(pr.jobs['python-runtime']).toMatchObject({
-      if: "github.event_name == 'pull_request'",
+      if: "github.event_name == 'pull_request' && !contains(format(',{0},', vars.DSH_CI_DISABLED), ',python-runtime,')",
       uses: runtimeBuilder,
-      with: { ci: true, targets: 'node24-linux-x64,node24-win-x64' },
+      with: { ci: true },
     })
+    const targets = String(pr.jobs['python-runtime']!.with!.targets)
+    expect(targets).toContain("'node24-linux-x64,node24-win-x64'")
+    expect(targets).toContain(',python-runtime-windows,')
     expect(pr.jobs.windows).toBeUndefined()
     expect(JSON.stringify(pr.jobs)).not.toMatch(/wine-windows-gates|check:windows-wine/)
     const aggregate = pr.jobs['all-checks-passed']!
@@ -88,7 +109,8 @@ describe('master-only platform scheduling', () => {
     expect(aggregate.needs!.every(id => id in pr.jobs)).toBe(true)
     expect(aggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' }}")
     expect(aggregate.steps).toContainEqual(expect.objectContaining({
-      if: "contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')",
+      name: 'Fail if any needed job did not succeed',
+      env: { NEEDS: '${{ toJSON(needs) }}', DSH_CI_DISABLED: '${{ vars.DSH_CI_DISABLED }}' },
     }))
   })
 
