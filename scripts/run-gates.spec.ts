@@ -395,6 +395,16 @@ describe('gate graph validation', () => {
     },
   )
 
+  it.each(['ci-primary', 'ci-static'] as const)(
+    'audits package origins in %s',
+    (mode) => {
+      const gate = withPnpmEntrypoint(() => gatesForMode(mode).find(subject => subject.id === 'package-origins'))
+
+      expect(gate?.args).toContain('verify-package-origins')
+      expect(gate?.allowFailure).not.toBe(true)
+    },
+  )
+
   it.each(['ci-primary', 'ci-static', 'check-all', 'hygiene'] as const)(
     'keeps package dependency enforcement in %s',
     (mode) => {

@@ -54,17 +54,16 @@ function workspace(entries: Record<string, Manifest>): { manifests: Map<string, 
 
 describe('tierExternalDeps', () => {
   it('limits the LibreOffice exception to its reviewed package identity and MPL terms', () => {
-    for (const name of [
-      '@deepseek-ai/libreoffice-kit', '@deepseek-ai/libreoffice-kit-wasm',
-      '@deepseek-ai/libreoffice-kit-darwin-arm64', '@deepseek-ai/libreoffice-kit-darwin-x64',
-      '@deepseek-ai/libreoffice-kit-win32-arm64', '@deepseek-ai/libreoffice-kit-win32-x64',
-    ]) {
+    for (const name of ['@deepseek-ai/libreoffice-kit', '@deepseek-ai/libreoffice-kit-wasm']) {
       expect(() => { assertRuntimeLicenses([{ name, license: 'MPL-2.0' }]) }).not.toThrow()
       expect(() => { assertRuntimeLicenses([{ name, license: 'GPL-3.0-only' }]) }).toThrow(name)
     }
     for (const dependency of [
       { name: 'unrelated-library', license: 'MPL-2.0' },
       { name: '@deepseek-ai/dsh-libreoffice-kit', license: 'MPL-2.0' },
+      // MAGDA's kit release runs WASM on every OS and ships no native engines.
+      { name: '@deepseek-ai/libreoffice-kit-darwin-arm64', license: 'MPL-2.0' },
+      { name: '@deepseek-ai/libreoffice-kit-win32-x64', license: 'MPL-2.0' },
       { name: '@deepseek-ai/libreoffice-kit-unreviewed', license: 'MPL-2.0' },
       { name: '@deepseek-ai/libreoffice-kit', license: 'GPL-3.0-only' },
       { name: '@deepseek-ai/libreoffice-kit', license: 'UNKNOWN' },

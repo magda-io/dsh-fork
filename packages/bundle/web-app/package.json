@@ -201,7 +201,7 @@
     "@deepseek-ai/dsh-shell-env": "workspace:*",
     "@deepseek-ai/dsh-system-prompt": "workspace:*",
     "@deepseek-ai/dsh-typert-registry": "workspace:*",
-    "@deepseek-ai/libreoffice-kit": "^0.1.5",
+    "@deepseek-ai/libreoffice-kit": "https://github.com/magda-io/dsh-libreoffice-kit/releases/download/v0.1.5-magda.1/deepseek-ai-libreoffice-kit-0.1.5-magda.1.tgz",
     "@deepseek-ai/dsh-otel": "workspace:*"
   }
 }
