@@ -195,8 +195,11 @@ jobs:
           if (( install_status != 0 )); then exit "$install_status"; fi
           exit "$sandbox_status"
 
+      # Standard GitHub-hosted runners are too small for the instrumented lane's
+      # timing-sensitive suites, so 'github' runs the same tests uninstrumented,
+      # as the Sandbox workflow's hosted darwin lane does.
       - name: Run exhaustive coverage
-        run: pnpm run check:ci:coverage
+        run: "${{ vars.DSH_CI_FAILOVER_LINUX == 'github' && 'pnpm run check:ci:unit' || 'pnpm run check:ci:coverage' }}"
 
   node-24-bench:
     if: github.event_name == 'pull_request' && !contains(format(',{0},', vars.DSH_CI_DISABLED), ',node-24-bench,')

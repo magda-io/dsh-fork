@@ -678,6 +678,14 @@ describe('CI workflow', () => {
       expect(evaluateRunsOn(jobs['all-checks-passed']?.['runs-on'], verdictContext)).toBe('ubuntu-latest')
     })
 
+    it("runs the uninstrumented unit lane instead of coverage under 'github'", () => {
+      const steps = (jobs['node-24-coverage']?.steps as unknown[]).filter(isRecord)
+      const lane = steps.find(step => step.name === 'Run exhaustive coverage')
+      expect(evaluateExpression(lane?.run, { vars: { DSH_CI_FAILOVER_LINUX: 'github' } })).toBe('pnpm run check:ci:unit')
+      expect(evaluateExpression(lane?.run, { vars: {} })).toBe('pnpm run check:ci:coverage')
+      expect(evaluateExpression(lane?.run, { vars: { DSH_CI_FAILOVER_LINUX: 'selfhosted' } })).toBe('pnpm run check:ci:coverage')
+    })
+
     it('drops only the Windows python-runtime target when disabled', () => {
       const inputs = jobs['python-runtime']?.with as Record<string, unknown>
       expect(evaluateExpression(inputs.targets, { vars: { DSH_CI_DISABLED: 'python-runtime-windows' } })).toBe('node24-linux-x64')
