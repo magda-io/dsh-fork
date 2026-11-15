@@ -4,8 +4,11 @@
  * the scope but resolve to links or directories, and MAGDA builds and releases
  * the Office kit itself. Every lockfile resolution that is neither the registry
  * nor a directory must match an allowed tarball by exact URL and integrity.
- * This replaces pnpm's `blockExoticSubdeps`, which the kit's engine
- * subdependency requires off and which never runs in a frozen install.
+ * This detects in the resulting lockfile what pnpm's `blockExoticSubdeps`
+ * would prevent during resolution; the kit's engine subdependency requires
+ * that setting off. The installed-tree check rejects unexpected or wrong-version
+ * packages it finds. It compares names and versions, not file contents, and
+ * does not require optional packages to be installed.
  */
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'

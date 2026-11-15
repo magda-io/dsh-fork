@@ -25,9 +25,12 @@ overrides:
   '@deepseek-ai/libreoffice-kit-wasm': 'https://github.com/magda-io/dsh-libreoffice-kit/releases/download/v0.1.5-magda.1/deepseek-ai-libreoffice-kit-wasm-0.1.5-magda.1.tgz'
 
 # The kit adapter's optional WASM engine resolves through the override above, so
-# it is a tarball-URL subdependency. pnpm checks exotic subdependencies only
-# while resolving, never in a frozen install; the origin audit instead allows
-# every non-registry lockfile resolution only by exact URL and integrity.
+# it is a tarball-URL subdependency, which this check would reject. pnpm runs the
+# check only while resolving, never in a frozen install. Compensating controls:
+# production builds use the frozen lockfile at a reviewed commit; every lockfile
+# change needs review and `pnpm run verify-package-origins`, which allows a
+# non-registry resolution only by exact URL and integrity; and `allowBuilds`
+# still blocks unreviewed install scripts.
 blockExoticSubdeps: false
 
 peerDependencyRules:
