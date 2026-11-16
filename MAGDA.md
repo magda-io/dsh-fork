@@ -1,6 +1,6 @@
 # MAGDA maintenance of DSH
 
-This fork carries the DSH revision that [MAGDA](https://github.com/magda-io/magda)'s agent runtime image (`magda-agent-runtime`) builds from source. MAGDA pins an exact release tag and commit SHA from this repository; it never builds from a moving branch.
+This fork carries the DSH revision that [MAGDA](https://github.com/magda-io/magda)'s agent runtime image (`magda-agent-runtime`) builds from source. MAGDA pins an exact release tag and commit SHA from this repository, chosen from the repository's **Releases** page; it never builds from a branch.
 
 ## Branches and tags
 
@@ -12,6 +12,29 @@ This fork carries the DSH revision that [MAGDA](https://github.com/magda-io/magd
 | `main` branch | The repository default, mirroring upstream. MAGDA work doesn't land here. |
 
 `<magda-version>` counts MAGDA releases on one upstream baseline; raise its patch number for each maintenance release.
+
+## Versions MAGDA may pin
+
+MAGDA may pin a version only when all of these hold:
+
+1. It is an annotated `magda/<upstream-version>/<magda-version>` tag on a merge commit of the `magda` branch.
+2. It has a published GitHub release on that tag, not a draft. The repository's **Releases** page is therefore the list of versions MAGDA can use; a tag without a release record isn't one of them.
+3. Its release isn't marked withdrawn.
+
+Never pin a branch (including `magda`), a commit without a release, or a tag without a release record.
+
+Review enforces this rule, not automation; MAGDA's image build checks only the tag type, the commit SHA and the upstream ancestry. A MAGDA pull request that changes the pin links the release in its description. Its reviewer checks:
+- that the release exists, and isn't a draft or withdrawn;
+- that `DSH_SOURCE_REF` is the release's tag;
+- that `DSH_SOURCE_SHA` is the full SHA of the commit that tag points at.
+
+### Withdrawing a release
+
+If a release must no longer be used, keep its tag: images built from it record the tag and the commit SHA, so never delete, move or re-create it. Instead:
+- edit the release title to start with `[Withdrawn]`;
+- add a first line to its notes giving the reason and the version to use instead.
+
+A MAGDA pin that still uses the withdrawn version moves to a later release in its next update.
 
 ## Changing the `magda` branch
 
@@ -80,7 +103,12 @@ Create the annotated tag first, then the GitHub release on that existing tag. MA
    gh release view magda/<upstream-version>/<magda-version> --json isPrerelease,isDraft,assets
    ```
 
-5. Pin the release in MAGDA: set `DSH_SOURCE_REF` to the tag and `DSH_SOURCE_SHA` to the full commit SHA in `magda-agent-runtime/Dockerfile`, then run that component's image checks. The build checks:
+5. Pin the release in MAGDA, under the rules in [Versions MAGDA may pin](#versions-magda-may-pin):
+   - in `magda-agent-runtime/Dockerfile`, set `DSH_SOURCE_REF` to the tag name and `DSH_SOURCE_SHA` to its full commit SHA;
+   - run that component's image checks;
+   - link the release in the MAGDA pull request.
+
+   `DSH_SOURCE_REF` is always a release tag name, never a branch name. The build clones it with `git clone --branch`, which accepts a tag despite its name, and fails unless the ref is an annotated tag at `DSH_SOURCE_SHA`. The build checks:
    - the tag type and the commit SHA;
    - that the upstream baseline is an ancestor;
    - the locked dependency graph.
