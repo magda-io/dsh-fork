@@ -25,8 +25,8 @@ Never pin a branch (including `magda`), a commit without a release, or a tag wit
 
 Review enforces this rule, not automation; MAGDA's image build checks only the tag type, the commit SHA and the upstream ancestry. A MAGDA pull request that changes the pin links the release in its description. Its reviewer checks:
 - that the release exists, and isn't a draft or withdrawn;
-- that `DSH_SOURCE_REF` is the release's tag;
-- that `DSH_SOURCE_SHA` is the full SHA of the commit that tag points at.
+- that `DSH_RELEASE_TAG` is the release's tag;
+- that `DSH_RELEASE_SHA` is the full SHA of the commit that tag points at.
 
 ### Withdrawing a release
 
@@ -104,11 +104,11 @@ Create the annotated tag first, then the GitHub release on that existing tag. MA
    ```
 
 5. Pin the release in MAGDA, under the rules in [Versions MAGDA may pin](#versions-magda-may-pin):
-   - in `magda-agent-runtime/Dockerfile`, set `DSH_SOURCE_REF` to the tag name and `DSH_SOURCE_SHA` to its full commit SHA;
+   - in `magda-agent-runtime/Dockerfile`, set `DSH_RELEASE_TAG` to the tag name and `DSH_RELEASE_SHA` to its full commit SHA;
    - run that component's image checks;
    - link the release in the MAGDA pull request.
 
-   `DSH_SOURCE_REF` is always a release tag name, never a branch name. The build clones it with `git clone --branch`, which accepts a tag despite its name, and fails unless the ref is an annotated tag at `DSH_SOURCE_SHA`. The build checks:
+   `DSH_RELEASE_TAG` is always a release tag name, never a branch name. The build clones it with `git clone --branch`, which accepts a tag despite its name, and fails unless the ref is an annotated tag at `DSH_RELEASE_SHA`. The build checks:
    - the tag type and the commit SHA;
    - that the upstream baseline is an ancestor;
    - the locked dependency graph.
