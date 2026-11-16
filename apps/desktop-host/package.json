@@ -12,7 +12,7 @@
   ],
   "dependencies": {
     "koffi": "^3.1.0",
-    "@deepseek-ai/libreoffice-kit": "^0.1.5",
+    "@deepseek-ai/libreoffice-kit": "https://github.com/magda-io/dsh-libreoffice-kit/releases/download/v0.1.5-magda.1/deepseek-ai-libreoffice-kit-0.1.5-magda.1.tgz",
     "@deepseek-ai/cordis": "workspace:~",
     "@deepseek-ai/dsh": "workspace:*",
     "@deepseek-ai/dsh-agent": "workspace:*",
