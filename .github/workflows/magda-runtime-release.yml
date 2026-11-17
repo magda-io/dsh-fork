@@ -88,9 +88,10 @@ jobs:
           df -h /
           # Build in this fresh checkout, mounted read-write. build.sh marks it
           # safe for git, since the runner's user owns it and the container
-          # runs as root.
+          # runs as root. CI is passed through so that the repository's
+          # postinstall skips installing local git hooks, as on the runner.
           docker run --rm -v "$PWD":/src -w /src \
-            -e TAG -e SHA -e DSH_UPSTREAM_REF -e DSH_UPSTREAM_SHA -e DSH_TELEMETRY_DISABLED \
+            -e CI -e TAG -e SHA -e DSH_UPSTREAM_REF -e DSH_UPSTREAM_SHA -e DSH_TELEMETRY_DISABLED \
             "$BUILD_IMAGE" \
             bash magda/runtime/build.sh build "$TAG" "$SHA" "$DSH_UPSTREAM_REF" "$DSH_UPSTREAM_SHA" /src/dist
           df -h /
