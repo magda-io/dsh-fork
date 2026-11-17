@@ -13,6 +13,8 @@ This fork carries the DSH revision that [MAGDA](https://github.com/magda-io/magd
 
 `<magda-version>` counts MAGDA releases on one upstream baseline; raise its patch number for each maintenance release.
 
+[`MAGDA-CHANGES.md`](MAGDA-CHANGES.md) lists what each release changes from the upstream baseline, and what to check for each change when moving to a new upstream release.
+
 ## Versions MAGDA may pin
 
 MAGDA may pin a version only when all of these hold:
@@ -48,7 +50,7 @@ The lefthook pre-push hook runs `pnpm run typecheck`. It needs `pnpm` on `PATH` 
 
 Create the annotated tag first, then the GitHub release on that existing tag. MAGDA's image build requires an annotated tag object: it checks `git cat-file -t refs/tags/<tag>` is `tag`. A tag created by `gh release create` or the GitHub web form is a lightweight tag and fails that check.
 
-1. Update and check the release commit:
+1. Add the release's section to [`MAGDA-CHANGES.md`](MAGDA-CHANGES.md) in a pull request into `magda`, so that the tag includes it. Then update and check the release commit:
 
    ```sh
    git fetch origin --tags
