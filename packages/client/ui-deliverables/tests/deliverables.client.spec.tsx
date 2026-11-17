@@ -985,7 +985,7 @@ it.each(['opening', 'opened', 'error'] as const)('shows the %s state and permits
 })
 
 
-it('explains a missing desktop and retries failed Host metadata', () => {
+it('retries failed Host metadata and adds no note when the Host has no desktop', () => {
   const controller = new PresentedOpenController()
   const props = openProps(controller)
   const matched = { changes: null, presented: [{ path: 'file.txt', seq: 2, index: 0 }] }
@@ -996,7 +996,10 @@ it('explains a missing desktop and retries failed Host metadata', () => {
   expect(props.reloadPresentedHost).toHaveBeenCalledOnce()
   controller.host.set({ name: 'server', available: false, fileManager: null })
   view.rerender(<Deliverables {...props} matched={matched} openFile={() => {}} sessionId={SessionId('session')} t={makeTranslate(en)} />)
-  expect(view.getByText(en['presented.unavailable'])).toBeTruthy()
+  // Cards already omit native actions without a desktop, and still offer the
+  // sidebar preview, so a note under every turn's deliverables is only noise.
+  expect(view.queryByText(/no desktop available/i)).toBeNull()
+  expect(view.getByRole('button', { name: en['presented.previewCard'].replace('{name}', 'file.txt') })).toBeTruthy()
 })
 
 
