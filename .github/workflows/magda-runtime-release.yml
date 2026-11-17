@@ -1,0 +1,134 @@
+name: MAGDA runtime archives
+
+# Builds the DSH runtime archives that MAGDA's agent runtime image installs
+# (MAGDA.md, "Runtime archives"), one per architecture, natively on
+# GitHub-hosted runners and inside the same Debian image MAGDA builds on.
+# - A published release `magda/<upstream-version>/<magda-version>` gets the
+#   archives and SHA256SUMS attached, and the checksums added to its notes.
+# - A pull request into `magda` that touches the build builds both archives
+#   without publishing them.
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    branches: [magda]
+    paths:
+      - 'magda/runtime/**'
+      - '.github/workflows/magda-runtime-release.yml'
+
+permissions:
+  contents: read
+
+env:
+  # Must match MAGDA's runtime image base (magda-agent-runtime/Dockerfile,
+  # NODE_VERSION) so native addons load there.
+  BUILD_IMAGE: node:22.22.0-bookworm-slim
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request' || startsWith(github.event.release.tag_name, 'magda/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The helpers' tests need only the root's js-yaml, not the whole workspace.
+      - run: corepack enable && pnpm install --frozen-lockfile --ignore-scripts --filter .
+      - run: node --test magda/runtime/*.test.mjs
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Select the release to build
+        id: release
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = release ]; then
+            tag=$RELEASE_TAG
+            # Keep the annotated tag object, not a lightweight local copy.
+            git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+            git checkout -q "refs/tags/$tag"
+          else
+            # A pull request builds its merge commit under a throwaway tag, so
+            # build.sh checks it exactly as it checks a release.
+            tag="magda/pr-${{ github.event.pull_request.number }}/run-${{ github.run_id }}"
+            git -c user.name=ci -c user.email=ci@invalid tag -a "$tag" -m "pull request build"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build in ${{ env.BUILD_IMAGE }}
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          . magda/runtime/upstream.env
+          df -h /
+          mkdir -p dist
+          docker run --rm -v "$PWD":/in:ro -v "$PWD/dist":/out \
+            -e TAG -e SHA -e DSH_UPSTREAM_REF -e DSH_UPSTREAM_SHA -e DSH_TELEMETRY_DISABLED \
+            "$BUILD_IMAGE" bash -c '
+              set -euo pipefail
+              apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null
+              git config --global --add safe.directory /in
+              git clone -q /in /src && cd /src && git checkout -q "refs/tags/$TAG"
+              bash magda/runtime/build.sh build "$TAG" "$SHA" "$DSH_UPSTREAM_REF" "$DSH_UPSTREAM_SHA" /out
+            '
+          df -h /
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-runtime-linux-${{ matrix.arch }}
+          path: dist/dsh-runtime-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.release.tag_name }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dsh-runtime-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Attach the archives and their checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum dsh-runtime-linux-amd64.tar.gz dsh-runtime-linux-arm64.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          # Without --clobber: an asset that is already attached is never replaced.
+          gh release upload "$TAG" dsh-runtime-linux-amd64.tar.gz dsh-runtime-linux-arm64.tar.gz SHA256SUMS
+          gh release view "$TAG" --json body --jq .body > notes.md
+          {
+            printf '\n## Runtime archives\n\nBuilt by %s.\n\n```\n' "$RUN_URL"
+            cat SHA256SUMS
+            printf '```\n'
+          } >> notes.md
+          gh release edit "$TAG" --notes-file notes.md
