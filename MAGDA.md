@@ -128,7 +128,7 @@ MAGDA's image doesn't build DSH. It installs a runtime archive from the release 
 
 `build.sh` refuses to build anything but the exact release:
 - the tag must be annotated and point at the checked-out commit;
-- the upstream baseline in `magda/runtime/upstream.env` must be an ancestor of it;
+- the commit of the upstream branch named in `magda/runtime/upstream.env` must be an ancestor of it. That branch is kept unchanged, and MAGDA pins the same commit separately, so an archive built from a moved branch fails MAGDA's build;
 - the lockfile must be unchanged by the deploy;
 - DSH's `verify-package-origins` must pass on the deployed tree.
 

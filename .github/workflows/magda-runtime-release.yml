@@ -81,20 +81,18 @@ jobs:
         run: |
           set -euo pipefail
           . magda/runtime/upstream.env
+          git fetch -q origin "refs/heads/$DSH_UPSTREAM_REF:refs/remotes/origin/$DSH_UPSTREAM_REF"
+          DSH_UPSTREAM_SHA=$(git rev-parse "refs/remotes/origin/$DSH_UPSTREAM_REF^{commit}")
+          export DSH_UPSTREAM_SHA
+          echo "upstream baseline: $DSH_UPSTREAM_REF at $DSH_UPSTREAM_SHA"
           df -h /
-          mkdir -p dist
-          docker run --rm -v "$PWD":/in:ro -v "$PWD/dist":/out \
+          # Build in this fresh checkout, mounted read-write. build.sh marks it
+          # safe for git, since the runner's user owns it and the container
+          # runs as root.
+          docker run --rm -v "$PWD":/src -w /src \
             -e TAG -e SHA -e DSH_UPSTREAM_REF -e DSH_UPSTREAM_SHA -e DSH_TELEMETRY_DISABLED \
-            "$BUILD_IMAGE" bash -c '
-              set -euo pipefail
-              apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null
-              # The runner owns the checkout; git checks the clone source's
-              # .git directory too, not only the work tree.
-              git config --global --add safe.directory /in
-              git config --global --add safe.directory /in/.git
-              git clone -q /in /src && cd /src && git checkout -q "refs/tags/$TAG"
-              bash magda/runtime/build.sh build "$TAG" "$SHA" "$DSH_UPSTREAM_REF" "$DSH_UPSTREAM_SHA" /out
-            '
+            "$BUILD_IMAGE" \
+            bash magda/runtime/build.sh build "$TAG" "$SHA" "$DSH_UPSTREAM_REF" "$DSH_UPSTREAM_SHA" /src/dist
           df -h /
       - uses: actions/upload-artifact@v4
         with:

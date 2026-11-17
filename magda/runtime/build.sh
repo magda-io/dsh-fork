@@ -39,6 +39,10 @@ build() {
   local tag=$1 sha=$2 upstream_ref=$3 upstream_sha=$4 out=$5
   local deploy=${DSH_DEPLOY_DIR:-/opt/dsh-release}
   local repo=${DSH_SOURCE_REPO:-https://github.com/magda-io/dsh-fork.git}
+  # One store for the install and the offline deploy. Otherwise pnpm puts the
+  # store on the checkout's filesystem when that's a mount, and the deploy to
+  # $deploy looks in another one.
+  local store=${DSH_PNPM_STORE:-/root/.local/share/pnpm/store}
 
   [ -f /etc/debian_version ] && [[ "$(cut -d. -f1 /etc/debian_version)" == 12 ]] \
     || fail "run inside node:<version>-bookworm-slim (Debian 12)"
@@ -60,7 +64,7 @@ build() {
   [ "$(node -p 'require("./apps/cli/package.json").version')" = "$version" ] \
     || fail "apps/cli version differs from the root version $version"
 
-  pnpm install --frozen-lockfile
+  pnpm install --frozen-lockfile --store-dir "$store"
   pnpm run build:official
   pnpm exec tsx native/system/scripts/build.ts
   pnpm run verify-runtime-closure
@@ -69,7 +73,7 @@ build() {
   # upstream executable assembly. Modern offline deploy preserves the committed
   # external graph; pnpm 11 legacy+hoisted deploy silently ignores that lockfile.
   node magda/runtime/prepare-deploy.mjs
-  pnpm --filter dsh-python-runtime-closure --prod deploy --offline \
+  pnpm --filter dsh-python-runtime-closure --prod deploy --offline --store-dir "$store" \
     --config.inject-workspace-packages=true --config.allow-unused-patches=true \
     --config.node-linker=hoisted "$deploy"
   git diff --exit-code -- pnpm-lock.yaml

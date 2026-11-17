@@ -292,7 +292,7 @@ test("rejects missing or abbreviated source and upstream baseline metadata", asy
             /DSH_RELEASE_SHA must be a full SHA/
         ],
         [
-            { DSH_UPSTREAM_SHA: "5badb150" },
+            { DSH_UPSTREAM_SHA: "deadbeef" },
             /DSH_UPSTREAM_SHA must be a full SHA/
         ]
     ]) {
