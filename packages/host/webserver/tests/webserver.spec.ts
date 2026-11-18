@@ -7,6 +7,7 @@
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
+import { Server } from 'node:http'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,7 +29,7 @@ afterEach(async () => {
 })
 
 /** Write a cordis.yml with one webserver row, then boot it through the real Loader. */
-async function loadComposition(port = 0, gzip = false): Promise<Context> {
+async function loadComposition(port = 0, gzip = false, extra: readonly string[] = []): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-webserver-loader-'))
   const configPath = join(root, 'cordis.yml')
   await writeFile(configPath, [
@@ -43,6 +44,7 @@ async function loadComposition(port = 0, gzip = false): Promise<Context> {
         '    compressionThresholdBytes: 16',
       ]
       : []),
+    ...extra,
     '',
   ].join('\n'))
 
@@ -104,6 +106,7 @@ describe('real Loader composition', () => {
       compression: 'none',
       compressionLevel: 1,
       compressionThresholdBytes: 1024,
+      requestTimeoutMs: 300_000,
     })
     expect(() => HttpServer.Config({
       host: '127.0.0.1', port: 0, compressionLevel: 10,
@@ -353,6 +356,30 @@ describe('real Loader composition', () => {
       { kind: 'script', placement: 'body', text: 'B' },
     ])).toBe('<script>H</script><main>x</main><script>B</script>'
       + '<script>(globalThis.__DSH_BOOT_READY__ ??= Promise.withResolvers()).resolve()</script>')
+  })
+
+  it('applies requestTimeoutMs to the Node server, keeping its header timeout', { timeout: 60_000 }, async () => {
+    interface Timeouts { readonly requestTimeout: number; readonly headersTimeout: number }
+    const timeoutsOf = (ctx: Context): Timeouts => {
+      const server: unknown = Reflect.get(ctx.webServer, 'server')
+      if (!(server instanceof Server)) throw new Error('webServer has no Node server')
+      return { requestTimeout: server.requestTimeout, headersTimeout: server.headersTimeout }
+    }
+    /** Replace the running composition with one that adds `extra` config lines. */
+    const reload = async (extra: readonly string[]): Promise<Timeouts> => {
+      await context?.fiber.dispose()
+      if (root !== undefined) await rm(root, { recursive: true, force: true })
+      return timeoutsOf(await loadComposition(0, false, extra))
+    }
+    const defaults = await reload([])
+    expect(defaults.requestTimeout).toBe(300_000)
+    const headersTimeout = defaults.headersTimeout
+    const long = await reload(['    requestTimeoutMs: 3600000'])
+    expect(long.requestTimeout).toBe(3_600_000)
+    expect(long.headersTimeout).toBe(headersTimeout)
+    const off = await reload(['    requestTimeoutMs: 0'])
+    expect(off.requestTimeout).toBe(0)
+    expect(off.headersTimeout).toBe(headersTimeout)
   })
 
   it('fails the fiber when the port is already taken (fail-loud at activation)', { timeout: 60_000 }, async () => {
