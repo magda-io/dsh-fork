@@ -7,7 +7,7 @@
 
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
-import type { Server } from 'node:http'
+import { Server } from 'node:http'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -359,12 +359,17 @@ describe('real Loader composition', () => {
   })
 
   it('applies requestTimeoutMs to the Node server, keeping its header timeout', { timeout: 60_000 }, async () => {
-    const serverOf = (ctx: Context): Server => Reflect.get(ctx.webServer, 'server')
+    interface Timeouts { readonly requestTimeout: number; readonly headersTimeout: number }
+    const timeoutsOf = (ctx: Context): Timeouts => {
+      const server: unknown = Reflect.get(ctx.webServer, 'server')
+      if (!(server instanceof Server)) throw new Error('webServer has no Node server')
+      return { requestTimeout: server.requestTimeout, headersTimeout: server.headersTimeout }
+    }
     /** Replace the running composition with one that adds `extra` config lines. */
-    const reload = async (extra: readonly string[]): Promise<Server> => {
+    const reload = async (extra: readonly string[]): Promise<Timeouts> => {
       await context?.fiber.dispose()
       if (root !== undefined) await rm(root, { recursive: true, force: true })
-      return serverOf(await loadComposition(0, false, extra))
+      return timeoutsOf(await loadComposition(0, false, extra))
     }
     const defaults = await reload([])
     expect(defaults.requestTimeout).toBe(300_000)
