@@ -1537,6 +1537,11 @@ export interface Config {
   compressionLevel?: number
   /** Minimum known response length eligible for gzip; unknown-length streams are eligible. @default 1024 */
   compressionThresholdBytes?: number
+  /**
+   * Milliseconds a client has to send a whole request (Node's `server.requestTimeout`);
+   * 0 disables it. Node's 60-second header timeout is unchanged. @default 300000
+   */
+  requestTimeoutMs?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-host-webserver -->

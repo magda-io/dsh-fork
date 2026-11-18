@@ -67,16 +67,23 @@ export interface Config {
   compressionLevel?: number
   /** Minimum known response length eligible for gzip; unknown-length streams are eligible. @default 1024 */
   compressionThresholdBytes?: number
+  /**
+   * Milliseconds a client has to send a whole request (Node's `server.requestTimeout`);
+   * 0 disables it. Node's 60-second header timeout is unchanged. @default 300000
+   */
+  requestTimeoutMs?: number
 }
 
 const DEFAULT_COMPRESSION = 'none' as const
 const DEFAULT_COMPRESSION_LEVEL = 1
 const DEFAULT_COMPRESSION_THRESHOLD_BYTES = 1024
+const DEFAULT_REQUEST_TIMEOUT_MS = 300_000
 
 interface ResolvedConfig extends Config {
   compression: 'none' | 'gzip'
   compressionLevel: number
   compressionThresholdBytes: number
+  requestTimeoutMs: number
 }
 
 type NodeMiddleware = (
@@ -129,6 +136,7 @@ export class WebServer extends Service {
     compression: z.union([z.const('none'), z.const('gzip')]).default(DEFAULT_COMPRESSION),
     compressionLevel: z.number().step(1).min(0).max(9).default(DEFAULT_COMPRESSION_LEVEL),
     compressionThresholdBytes: z.natural().default(DEFAULT_COMPRESSION_THRESHOLD_BYTES),
+    requestTimeoutMs: z.natural().default(DEFAULT_REQUEST_TIMEOUT_MS),
   })
 
   private readonly exact = new Map<string, WebRoute>()
@@ -255,6 +263,9 @@ export class WebServer extends Service {
       if (this.gzip === undefined) next()
       else this.gzip(req, res, next)
     })
+    // Set after creation: a `requestTimeout` option of 0 would also turn off
+    // the header timeout that Node derives from it.
+    this.server.requestTimeout = (this.config as ResolvedConfig).requestTimeoutMs
     this.server.on('upgrade', (req, socket, head) => {
       const onError = (error: Error): void => {
         this.ctx.logger.warn(error)

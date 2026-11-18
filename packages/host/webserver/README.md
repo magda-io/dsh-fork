@@ -40,6 +40,8 @@ Compose the webserver as the HTTP transport of a browser-facing host, then let t
 
 Set `compression: 'gzip'` to wrap eligible socket-backed responses without changing route APIs. The client must accept gzip and the media type must be compressible or `multipart/form-data`; known response lengths below `compressionThresholdBytes` remain uncompressed, while unknown-length streams are eligible immediately. Existing encodings, `Cache-Control: no-transform`, range responses, SSE, ZIP, and the packaged `.gz` Worker image remain unchanged. The shipped Web bundle uses compression level 1 with a 1024-byte threshold; other compositions default to no compression.
 
+`requestTimeoutMs` is how long a client has to send a whole request, headers and body (Node's `server.requestTimeout`); the default is Node's 300000, and 0 removes the limit. Raise it when large uploads can take longer, for example behind a proxy that streams them. Node's 60-second limit for receiving headers stays in force.
+
 ### Registering routes
 
 `register(route)` adds a named `exact` or `prefix` HTTP route, `registerUpgrade(route)` adds an upgrade route for an exact pathname, and both return a disposer that removes the registration. A duplicate path within either table throws — route patterns are a composition-level contract, so a collision is a misconfiguration. HTTP matching is exact over the whole table, then longest prefix, then the fallback handler; upgrades match exactly and unmatched connections are closed.
