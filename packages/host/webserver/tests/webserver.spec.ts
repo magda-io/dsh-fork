@@ -360,17 +360,19 @@ describe('real Loader composition', () => {
 
   it('applies requestTimeoutMs to the Node server, keeping its header timeout', { timeout: 60_000 }, async () => {
     const serverOf = (ctx: Context): Server => Reflect.get(ctx.webServer, 'server')
-    const defaults = serverOf(await loadComposition())
+    /** Replace the running composition with one that adds `extra` config lines. */
+    const reload = async (extra: readonly string[]): Promise<Server> => {
+      await context?.fiber.dispose()
+      if (root !== undefined) await rm(root, { recursive: true, force: true })
+      return serverOf(await loadComposition(0, false, extra))
+    }
+    const defaults = await reload([])
     expect(defaults.requestTimeout).toBe(300_000)
     const headersTimeout = defaults.headersTimeout
-    await context?.fiber.dispose()
-    context = undefined
-    const long = serverOf(await loadComposition(0, false, ['    requestTimeoutMs: 3600000']))
+    const long = await reload(['    requestTimeoutMs: 3600000'])
     expect(long.requestTimeout).toBe(3_600_000)
     expect(long.headersTimeout).toBe(headersTimeout)
-    await context?.fiber.dispose()
-    context = undefined
-    const off = serverOf(await loadComposition(0, false, ['    requestTimeoutMs: 0']))
+    const off = await reload(['    requestTimeoutMs: 0'])
     expect(off.requestTimeout).toBe(0)
     expect(off.headersTimeout).toBe(headersTimeout)
   })
