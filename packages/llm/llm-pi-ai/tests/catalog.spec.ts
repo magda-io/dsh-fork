@@ -646,12 +646,8 @@ describe('per-model reasoning efforts', () => {
     }]))
 
     expect(model.reasoning).toBe(true)
-    // Undeclared levels are pinned null rather than left to pi-ai's own
-    // defaulting, which is asymmetric: an absent key means "supported" for the
-    // five base levels but "unsupported" for xhigh/max. A profile author
-    // should not need to know that. Declared `off` with no value stays absent
-    // from the map — supported, send nothing.
     expect(model.thinkingLevelMap).toEqual({
+      off: null,
       minimal: null,
       medium: null,
       xhigh: null,
@@ -670,6 +666,7 @@ describe('per-model reasoning efforts', () => {
 
   it('offers exactly the declared keys: leaving off out makes thinking mandatory', () => {
     const model = modelOf(declared([{ id: 'm', reasoningEfforts: { high: 'high' } }]))
+    expect(model.thinkingLevelMap?.off).toBeNull()
     expect(getSupportedThinkingLevels(model)).toEqual(['high'])
   })
 
@@ -697,6 +694,15 @@ describe('per-model reasoning efforts', () => {
 
     expect(model.reasoning).toBe(false)
     expect(getSupportedThinkingLevels(model)).toEqual(['off'])
+  })
+
+  it('keeps null catalog mappings unsupported without configured selectable levels', () => {
+    const base = modelOf(declared([{ id: 'm' }]))
+    expect(getSupportedThinkingLevels({
+      ...base,
+      reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: 'high', xhigh: null, max: null },
+    })).toEqual(['high'])
   })
 
   it('inherits the catalog capability when the field is absent', () => {

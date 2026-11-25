@@ -17,7 +17,7 @@ import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { DEFAULT_MAX_REQUEST_IMAGE_BYTES, resolveProfiles } from '../src/config.ts'
 import { memoryAuth } from './auth-double.ts'
 import { assemble } from './assemble.ts'
-import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
+import { closeMockServers, mockServer, responsesTextEvents, textEvents } from './mock-server.ts'
 
 afterEach(async () => {
   vi.useRealTimers()
@@ -239,6 +239,55 @@ describe('PiAiAdapter provider routing', () => {
     const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
     expect(result.finish.kind).toBe('error')
     expect(server.paths).toEqual(['/v1/responses'])
+  })
+
+  it('omits Responses reasoning for a declared-empty off and sends declared effort wire values', async () => {
+    const server = await mockServer(Array.from({ length: 4 }, () => ({ events: responsesTextEvents })))
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'responses-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'openai-responses',
+          baseURL: `${server.url}/v1`,
+          models: [
+            { id: 'empty-off', reasoningEfforts: { off: null, medium: 'medium' } },
+            { id: 'explicit-off', reasoningEfforts: { off: 'none', medium: 'medium' } },
+            { id: 'mandatory', reasoningEfforts: { medium: 'medium' } },
+          ],
+        },
+      },
+    })
+    const provider = 'responses-gateway'
+    for (const options of [
+      { model: 'empty-off' },
+      { model: 'empty-off', reasoningEffort: ReasoningEffortId('off') },
+      { model: 'empty-off', reasoningEffort: ReasoningEffortId('medium') },
+      { model: 'explicit-off', reasoningEffort: ReasoningEffortId('off') },
+    ]) {
+      const result = await assemble(ctx, { provider, ...options, messages: [] })
+      expect(result.finish).toEqual({ kind: 'stop' })
+      expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    }
+    expect(server.paths).toEqual(Array.from({ length: 4 }, () => '/v1/responses'))
+    expect(server.requests[0]).not.toHaveProperty('reasoning')
+    expect(server.requests[1]).not.toHaveProperty('reasoning')
+    expect(server.requests[2]).toMatchObject({ reasoning: { effort: 'medium' } })
+    expect(server.requests[3]).toMatchObject({ reasoning: { effort: 'none' } })
+
+    const unsupported = await assemble(ctx, {
+      provider,
+      model: 'mandatory',
+      reasoningEffort: ReasoningEffortId('off'),
+      messages: [],
+    })
+    expect(unsupported.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'UNSUPPORTED_REASONING_EFFORT' },
+    })
+    expect(server.requests).toHaveLength(4)
   })
 
   it('resolves attachment and filesystem services mounted after the adapter when dispatching an image', async () => {
@@ -680,7 +729,7 @@ describe('provider profile lifecycle', () => {
     expect(server.requests[0]).toMatchObject({ thinking: { type: 'enabled' }, reasoning_effort: 'high' })
 
     await prompt('off')
-    expect(server.requests[1]).toMatchObject({ thinking: { type: 'disabled' } })
+    expect(server.requests[1]).not.toHaveProperty('thinking')
     expect(server.requests[1]).not.toHaveProperty('reasoning_effort')
   })
 

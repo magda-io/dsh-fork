@@ -62,6 +62,7 @@ import {
   type SdkPromptContentBlock,
 } from '@deepseek-ai/dsh-sdk-client'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import { startTitleResponsesFixture } from './session-title-after-turn/responses-fixture.ts'
 
 const corpusRoot = fileURLToPath(new URL('../', import.meta.url))
 
@@ -100,7 +101,16 @@ function dirOf(url: string): string {
   return fileURLToPath(new URL('.', url))
 }
 
+interface SdkRuntimeFixture {
+  readonly environment: Readonly<Record<string, string>>
+  onRootTurnEnd(): void
+  verify(): Promise<void>
+  close(): Promise<void>
+}
+
 interface SdkAssertions {
+  /** Optional local provider fixture, closed after its runtime subprocess. */
+  fixture?: () => Promise<SdkRuntimeFixture>
   /** Additional profile patches applied after the shared composition. */
   patches?: readonly string[]
   /** Final response required from a completed turn before updating goldens. */
@@ -125,6 +135,10 @@ interface SdkAssertions {
 }
 
 const SDK_ASSERTIONS: Readonly<Record<string, SdkAssertions>> = {
+  'session-title-after-turn': {
+    fixture: startTitleResponsesFixture,
+    expectedFinalResponse: 'TITLE_DONE',
+  },
   'dynamic-tool-updates': {
     expectedFinalResponse: 'DONE',
   },
@@ -603,18 +617,22 @@ async function runScenario(scenario: CorpusScenario): Promise<{
     ...childEnvironment,
   }
 
-  const harness = new DeepSeekHarness({
-    profile: 'sdk',
-    patches,
-    dshHome,
-    processCwd: cwd,
-    env,
-    requestTimeoutMs: 110_000,
-    cwd,
-    provider: route.provider,
-    model: route.model,
-  })
+  let harness: DeepSeekHarness | undefined
+  let fixture: SdkRuntimeFixture | undefined
   try {
+    fixture = await assertions.fixture?.()
+    Object.assign(env, fixture?.environment)
+    harness = new DeepSeekHarness({
+      profile: 'sdk',
+      patches,
+      dshHome,
+      processCwd: cwd,
+      env,
+      requestTimeoutMs: 110_000,
+      cwd,
+      provider: route.provider,
+      model: route.model,
+    })
     const notifications: HarnessNotification[] = []
     const observedMethods = new Set<string>()
     const results: RunResult[] = []
@@ -624,6 +642,9 @@ async function runScenario(scenario: CorpusScenario): Promise<{
     const subscription = harness.client.subscribeSessionTree(sessionId)
     const observe = (notification: HarnessNotification): void => {
       observedMethods.add(notification.method)
+      if (notification.params.sessionId === sessionId && notificationEvent(notification)?.type === 'turn/end') {
+        fixture?.onRootTurnEnd()
+      }
       if (notification.method !== 'subagent.started') return
       const child = notification.params.childSessionId
       if (typeof child !== 'string' || liveSessions.includes(child)) return
@@ -661,6 +682,7 @@ async function runScenario(scenario: CorpusScenario): Promise<{
           observe,
         )
       }
+      await fixture?.verify()
       for (const type of postTurnEventTypes(primaryFixture)) {
         await waitForRootEvent(subscription, sessionId, event => event.type === type, observe)
       }
@@ -677,8 +699,15 @@ async function runScenario(scenario: CorpusScenario): Promise<{
     })
     return { results, notifications, observedMethods, logs, initialWorkspace, finalWorkspace, cwd }
   } finally {
-    await harness.close()
-    await rm(cwd, { recursive: true, force: true })
+    try {
+      await harness?.close()
+    } finally {
+      try {
+        await fixture?.close()
+      } finally {
+        await rm(cwd, { recursive: true, force: true })
+      }
+    }
   }
 }
 
@@ -848,6 +877,21 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
       )
       reconcileCatalogCreationTimes(ordered.map(log => log.content), 'validate')
       const actualContext = contextOf(ordered, cwd)
+      if (scenario.name === 'session-title-after-turn') {
+        const events = records(ordered[0]!.content)
+        const request = events.find(event => event.type === 'session/title-llm-request')
+        expect(request).toMatchObject({ data: { route: { provider: 'title-replay', model: 'title-model' } } })
+        expect(request?.data).not.toHaveProperty('reasoningEffort')
+        const turnEnd = events.findIndex(event => event.type === 'turn/end')
+        expect(turnEnd).toBeGreaterThan(-1)
+        expect(events.slice(turnEnd + 1)).toEqual([
+          expect.objectContaining({ type: 'session/title', data: {
+            title: 'Late durable session title', messageSeqs: (request?.data as JsonObject | undefined)?.messageSeqs,
+            source: { kind: 'provider', provider: 'session-title-first-prompt-llm',
+              model: { provider: 'title-replay', model: 'title-model' } },
+          } }),
+        ])
+      }
       if (scenario.name === 'dynamic-tool-updates') {
         const selectedTypes = new Set(['request/header', 'request/context', 'developer/message', 'tool/call', 'tool/result'])
         const events = results.flatMap(result => result.events).filter(event => selectedTypes.has(event.type))

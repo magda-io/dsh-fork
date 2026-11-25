@@ -29,6 +29,15 @@ export const textEvents = [
   '[DONE]',
 ]
 
+/** A minimal complete text generation in pi-ai's OpenAI Responses format. */
+export const responsesTextEvents = [
+  '{"type":"response.created","response":{"id":"resp_1"}}',
+  '{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}',
+  '{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hello"}',
+  '{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello","annotations":[]}]}}',
+  '{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}',
+]
+
 /** Local provider stand-in: replays scripted behaviors per request. */
 export async function mockServer(script: {
   status?: number

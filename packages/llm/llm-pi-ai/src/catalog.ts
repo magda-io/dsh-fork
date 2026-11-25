@@ -681,20 +681,18 @@ interface ModelReasoning {
   reasoning: boolean
   /** The map dispatch reads; absent only when the installed entry's (or none) applies. */
   thinkingLevelMap?: ThinkingLevelMap
+  /** Explicitly offered levels, independent of pi-ai's wire-omission sentinel. */
+  supportedThinkingLevels?: ModelThinkingLevel[]
 }
 
 /**
  * Resolve one model's reasoning capability from its declared efforts.
  *
- * A declared dict translates to pi-ai's `thinkingLevelMap` with every level
- * decided explicitly: declared levels carry their wire spelling, undeclared
- * levels are pinned to `null` (unsupported). Pinning matters because pi-ai's
- * own defaulting is asymmetric — an absent key means "supported" for the five
- * base levels but "unsupported" for `xhigh`/`max` — and a profile author
- * should not need to know that. A declared `off` with no value is the one
- * exception: it stays absent from the map, which pi-ai reads as "supported,
- * send nothing" — the correct dispatch where not thinking is the parameter's
- * absence — while `off` with a value sends that value.
+ * Declared levels carry their wire spelling; undeclared levels map to `null`.
+ * A declared-empty `off` also maps to `null`, which suppresses the Responses
+ * reasoning parameter instead of sending pi-ai's default effort `none`.
+ * Selectable levels are recorded separately because that wire sentinel cannot
+ * distinguish a supported, valueless `off` from an undeclared one.
  * @param provider - provider route key, for diagnostics.
  * @param entry - the configured model entry.
  * @param base - the installed catalog entry of the same id, when one exists.
@@ -746,14 +744,13 @@ function resolveModelReasoning(
   }
   const map: ThinkingLevelMap = {}
   for (const level of THINKING_LEVELS) {
-    const wire = efforts[level]
-    if (wire === undefined) {
-      map[level] = null
-    } else if (wire !== null) {
-      map[level] = wire
-    }
+    map[level] = efforts[level] ?? null
   }
-  return { reasoning: true, thinkingLevelMap: map }
+  return {
+    reasoning: true,
+    thinkingLevelMap: map,
+    supportedThinkingLevels: declared.map(([level]) => level),
+  }
 }
 
 /** The compat block a materialized model carries, whichever protocol it speaks. */

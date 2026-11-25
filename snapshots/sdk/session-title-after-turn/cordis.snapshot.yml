@@ -1,6 +1,5 @@
-# Keyless session-title composition. Main-agent chunks derive from session.jsonl;
-# the auxiliary route consumes replay.override.json with pacing so its accepted
-# title commits only after the main turn has closed.
+# Main-agent chunks derive from the recorded Session. The SDK fixture serves
+# the auxiliary Responses endpoint and releases its title after main turn/end.
 - id: llm-deepseek
   name: '@deepseek-ai/dsh-llm-deepseek-api-key'
   disabled: true
@@ -30,25 +29,29 @@
 
       Verify your work by running the code or tests. Keep answers brief and factual.
 
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      title-replay:
+        apiKeyEnv: DSH_SNAPSHOT_TITLE_API_KEY
+        api: openai-responses
+        baseURL: !!js process.env.DSH_SNAPSHOT_TITLE_BASE_URL
+        models:
+          - id: title-model
+            reasoningEfforts:
+              off:
+              medium: medium
+
 - insert:
     - id: llm-replay-main
       name: '@deepseek-ai/dsh-llm-replay'
       config:
-        overrideFile: ./.missing-main-replay-override.json
         providers:
           - id: deepseek-official
             name: DeepSeek
             models:
               - id: deepseek-v4-flash
-    - id: llm-replay-title
-      name: '@deepseek-ai/dsh-llm-replay'
-      config:
-        paceMs: 10
-        providers:
-          - id: title-replay
-            name: Title replay
-            models:
-              - id: title-model
     - id: session-title-provider
       name: '@deepseek-ai/dsh-session-title-first-prompt-llm'
       config:

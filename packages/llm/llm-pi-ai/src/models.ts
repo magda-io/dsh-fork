@@ -52,12 +52,15 @@ export function createProvider(input: StaticProviderOptions): Provider {
 }
 
 /**
- * Resolve selectable reasoning levels from pi-ai's public model metadata.
- * @param model - model descriptor carrying reasoning support and wire mappings.
+ * Resolve selectable reasoning levels from configured declarations or pi-ai metadata.
+ * @param model - model descriptor with configured selectable levels or catalog wire mappings.
  * @returns supported levels in pi-ai's escalation order.
  */
-export function getSupportedThinkingLevels(model: Model<Api>): ModelThinkingLevel[] {
+export function getSupportedThinkingLevels(
+  model: Model<Api> & { supportedThinkingLevels?: readonly ModelThinkingLevel[] },
+): ModelThinkingLevel[] {
   if (!model.reasoning) return ['off']
+  if (model.supportedThinkingLevels !== undefined) return [...model.supportedThinkingLevels]
   return THINKING_LEVELS.filter((level) => {
     const mapped = model.thinkingLevelMap?.[level]
     if (mapped === null) return false
